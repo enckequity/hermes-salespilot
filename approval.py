@@ -9,12 +9,13 @@ The hook also leaves a one-use ticket holding a fingerprint of exactly what the 
 handler re-reads the draft and only proceeds when a ticket for the same content and session exists,
 so a call that skipped the hook, a draft edited after the card was shown, or arguments rewritten
 by another hook are refused. Unattended runs (cron, including subagents it delegated to, and
-finite unattended turns) are blocked before any card is shown. Every failure blocks.
+single-query and other turns where the engine says nobody can answer) are blocked before any card is shown. Every failure blocks.
 """
 
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import logging
 import threading
@@ -79,7 +80,8 @@ def clear() -> None:
 
 def unattended(ctx: Any = None) -> bool:
     """True when no person can answer: a cron run (also a subagent it delegated to, which the cron
-    identity hides), an engine-marked cron session, or a finite unattended turn. Fails closed."""
+    identity hides), an engine-marked cron session, a finite unattended turn, or any turn the engine's
+    approval context says nobody can answer (single-query, board-card and webhook/API runs). Fails closed."""
     ctx = _CTX if ctx is None else ctx
     current = getattr(ctx, "current_cron_execution", None) if ctx is not None else None
     try:
@@ -99,11 +101,30 @@ def unattended(ctx: Any = None) -> bool:
     try:
         from gateway.session_finite import unattended_turn
     except ImportError:
-        return False
+        unattended_turn = None
     try:
-        return bool(unattended_turn())
+        if unattended_turn is not None and unattended_turn():
+            return True
     except Exception:
         return True
+    reader = _no_user_reader()
+    if reader is None:
+        return True  # the engine cannot say whether anyone is there to answer: assume nobody is
+    try:
+        return bool(reader())
+    except Exception:
+        return True
+
+
+def _no_user_reader() -> Callable[[], bool] | None:
+    """The engine's own "nobody can answer an approval" check (single-query/finite turns, cron,
+    unattended platforms such as webhooks and the API server), or None when it is unavailable."""
+    try:
+        module = importlib.import_module("tools.approval_context")
+    except Exception:
+        return None
+    reader = getattr(module, "_no_user_can_answer", None)
+    return reader if callable(reader) else None
 
 
 def approvals_bypassed() -> bool:

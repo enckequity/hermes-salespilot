@@ -8,6 +8,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 import fetch
@@ -212,6 +213,10 @@ class HostApprovalTests(unittest.TestCase):
         import commands
 
         hook = approval_gate.make_hook(commands.send_preview, tools.ledger_preview)
+        # In this process the plugin's tools.py shadows the engine package: stand in for its reader.
+        reader = mock.patch.object(approval_gate, "_no_user_reader", lambda: (lambda: False))
+        reader.start()
+        self.addCleanup(reader.stop)
         args = {"draft_id": draft["draft"]["id"], "decision": "approve", "human_confirmed": False}
         directive = hook(tool_name="salespilot_request_approval", args=dict(args))
         self.assertEqual(directive["action"], "approve")

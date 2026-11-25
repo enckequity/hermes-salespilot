@@ -98,7 +98,7 @@ def compose(account: dict[str, Any], draft: dict[str, Any]) -> EmailMessage:
     message["From"] = header_value(sender, "from")
     message["To"] = recipient
     message["Subject"] = subject
-    message_id = make_msgid(domain="salespilot.local")
+    message_id = new_message_id(account.get("from_address") or "")
     message["Message-ID"] = header_value(message_id, "message-id")
     message.set_content(body)
     if account.get("signature_html"):
@@ -191,5 +191,19 @@ def _outcome(code: int, ambiguous: bool, message_id: str, recipient: str) -> dic
     }
 
 
-def new_message_id() -> str:
-    return make_msgid(idstring=uuid.uuid4().hex[:12], domain="salespilot.local")
+def _sender_domain(address: str) -> str:
+    """The domain of a valid sender address, else "" (no product name in outgoing headers)."""
+    try:
+        text = header_value(address, "from_address")
+    except ValueError:
+        return ""
+    if not text or not valid_email(text):
+        return ""
+    return text.rsplit("@", 1)[1].strip().lower()
+
+
+def new_message_id(from_address: str = "") -> str:
+    """A Message-ID on the sender's own domain; without one, the standard library's default (local host)."""
+    domain = _sender_domain(from_address)
+    idstring = uuid.uuid4().hex[:12]
+    return make_msgid(idstring=idstring, domain=domain) if domain else make_msgid(idstring=idstring)

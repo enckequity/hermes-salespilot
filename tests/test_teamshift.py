@@ -69,6 +69,9 @@ class _NoRealSmtp(unittest.TestCase):
             mock.patch.object(commands, "_secrets", lambda: ("nia@example.com", "not-a-real-password", "")),
             mock.patch.object(smtplib, "SMTP", side_effect=AssertionError("real SMTP opened")),
             mock.patch.object(smtplib, "SMTP_SSL", side_effect=AssertionError("real SMTP opened")),
+            # In this process the plugin's tools.py shadows the engine's tools package, so stand in
+            # for the engine's "nobody can answer" reader; the engine test below uses the real one.
+            mock.patch.object(approval, "_no_user_reader", lambda: (lambda: False)),
         ]
         for patch in patches:
             patch.start()
@@ -200,6 +203,25 @@ class NativeApprovalTests(_NoRealSmtp):
         self.assertEqual(len(self.calls), 1)
 
 
+class MessageIdTests(_NoRealSmtp):
+    def test_message_id_uses_the_senders_domain_not_the_product(self):
+        self.hook(tool_name=approval.SEND_TOOL, args=self.send_args())
+        _call(commands.send_email, self.send_args())
+        message_id = str(self.calls[0]["Message-ID"])
+        self.assertTrue(message_id.endswith("@example.com>"), message_id)
+        self.assertNotIn("salespilot", message_id.lower())
+
+    def test_message_id_without_a_usable_sender_falls_back_to_the_default(self):
+        import socket
+        for sender in ("", "not-an-address", "a@b\r\nBcc: x@y.z"):
+            with self.subTest(sender=sender):
+                with mock.patch.object(socket, "getfqdn", return_value="host.invalid"):
+                    message_id = mail.new_message_id(sender)
+                self.assertTrue(message_id.endswith("@host.invalid>"), message_id)
+                self.assertNotIn("salespilot", message_id.lower())
+        self.assertTrue(mail.new_message_id("Nia@Mail.Example.org").endswith("@mail.example.org>"))
+
+
 class CronTests(_NoRealSmtp):
     def test_cron_session_blocks_send_and_ledger_even_from_a_delegated_child(self):
         class NoCronIdentity:  # what a subagent delegated from a cron run sees
@@ -226,6 +248,25 @@ class CronTests(_NoRealSmtp):
             slash = json.loads(commands.slash_send(self.draft["id"]))
             self.assertEqual(slash["code"], "unattended")
         self.assertEqual(self.calls, [])
+        self.assertFalse(approval.unattended())
+
+    def test_engine_saying_nobody_can_answer_blocks(self):
+        with mock.patch.object(approval, "_no_user_reader", lambda: (lambda: True)):
+            self.assertTrue(approval.unattended())
+            self.assertEqual(self.hook(tool_name=approval.SEND_TOOL, args=self.send_args())["action"], "block")
+        self.hook(tool_name=approval.SEND_TOOL, args=self.send_args())
+        with mock.patch.object(approval, "_no_user_reader", lambda: (lambda: True)):
+            self.assertEqual(_call(commands.send_email, self.send_args())["code"], "unattended")
+        self.assertEqual(self.calls, [])
+
+    def test_missing_or_failing_reader_fails_closed(self):
+        with mock.patch.object(approval, "_no_user_reader", lambda: None):
+            self.assertTrue(approval.unattended())
+
+        def boom():
+            raise RuntimeError("reader broke")
+        with mock.patch.object(approval, "_no_user_reader", lambda: boom):
+            self.assertTrue(approval.unattended())
         self.assertFalse(approval.unattended())
 
     def test_cron_identity_blocks(self):
@@ -334,6 +375,10 @@ _ENGINE_SCRIPT = textwrap.dedent("""
          mock.patch.object(gate, "request_tool_approval", answer(True)):
         cron = model_tools.handle_function_call("salespilot_send_email", {"draft_id": draft["id"]}, task_id="t")
     out["cron_blocked"] = "unattended" in cron and len(asked) == 2
+    with mock.patch.dict(os.environ, {"HERMES_SINGLE_QUERY_SESSION": "1"}), \\
+         mock.patch.object(gate, "request_tool_approval", answer(True)):
+        single = model_tools.handle_function_call("salespilot_send_email", {"draft_id": draft["id"]}, task_id="t")
+    out["single_query_blocked"] = "unattended" in single and len(asked) == 2 and len(calls) == 1
     print("RESULT " + json.dumps(out))
 """)
 
@@ -364,6 +409,7 @@ class EngineIntegrationTests(unittest.TestCase):
         self.assertTrue(out["card_has_body"])
         self.assertTrue(out["rule_keys_distinct"])
         self.assertTrue(out["cron_blocked"])
+        self.assertTrue(out["single_query_blocked"])
 
 
 if __name__ == "__main__":
