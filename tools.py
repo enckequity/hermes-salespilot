@@ -7,10 +7,11 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from . import csv_import, discovery, domain, extract, fetch, followstate, inbox, pipeline, storage
+    from . import approval, csv_import, discovery, domain, extract, fetch, followstate, inbox, pipeline, storage
     from .adapters import adapter_for
     from .adapters.smtp import smtp_readiness
 except ImportError:  # unittest loads this file as a top-level module
+    import approval
     import csv_import
     import discovery
     import domain
@@ -486,7 +487,7 @@ def _discover(args: dict) -> str:
         return _dump({
             "ok": search.get("ok", False),
             "code": search.get("code") or "missing_discovery_url",
-            "error": "No permitted discovery URL, and Hermes search did not return usable pages.",
+            "error": "No permitted discovery URL, and web search did not return usable pages.",
             "search": {k: v for k, v in search.items() if k != "text"},
             "prospects": [],
             "fabricated": False,
@@ -787,52 +788,70 @@ def report(args: dict, **kwargs) -> str:
     return _dump(body)
 
 
-def _host_decision(action: str, draft: dict) -> tuple[str | None, str]:
-    """Ask Hermes. An LLM boolean is not authorization. Unattended surfaces fail closed."""
-    ctx = _CTX
-    ask = getattr(ctx, "ask_choice", None) if ctx is not None else None
-    surface_fn = getattr(ctx, "session_surface", None) if ctx is not None else None
-    if ask is None or surface_fn is None:
-        return None, "host_approval_unavailable"
-    try:
-        surface = str(surface_fn() or "")
-    except Exception:
-        return None, "surface_unknown"
-    if surface not in {"cli", "tui", "desktop"}:
-        return None, "unattended_surface"
-    try:
-        choice = ask(
-            f"Record {action} for draft {draft.get('id')}? This does not send a message.",
-            [action, "cancel"],
-        )
-    except Exception:
-        return None, "host_approval_failed"
-    if choice != action:
-        return None, "host_declined"
-    return str(choice), ""
+def _ledger_content(draft: dict, decision: str) -> dict[str, Any]:
+    return {
+        "draft_id": str(draft.get("id") or ""),
+        "action": decision,
+        "revision": domain.draft_revision(draft),
+        "to": str(draft.get("recipient") or ""),
+        "subject": str(draft.get("subject") or ""),
+    }
 
 
-def request_approval(args: dict, **kwargs) -> str:
-    args = args or {}
+def _ledger_check(conn, args: dict[str, Any]) -> tuple[dict | None, str, str]:
+    """Shared scope checks: ``(draft, decision, "")`` or ``(None, "", json_refusal)``."""
     draft_id = str(args.get("draft_id") or "").strip()
     decision = str(args.get("decision") or "").strip().lower()
     if decision == "request":
         decision = "pending"
     if not draft_id or decision not in {"pending", "approve", "reject"}:
-        return _fail("bad_decision", "draft_id and decision (request, approve, reject) are required.")
-    status = {"pending": "pending", "approve": "approved", "reject": "rejected"}[decision]
+        return None, "", _fail("bad_decision", "draft_id and decision (request, approve, reject) are required.")
+    draft = storage.get_draft(conn, draft_id)
+    if draft is None:
+        return None, "", _fail("draft_not_found", "draft_id was not found.")
+    requested_business = _ref(args)
+    if requested_business:
+        scoped, _reason = storage.resolve_brand(conn, requested_business)
+        if scoped is None or scoped["business_id"] != draft["business_id"]:
+            return None, "", _fail("scope_mismatch", "draft_id belongs to a different business.")
+    requested_lead = str(args.get("lead_id") or "")
+    if requested_lead and requested_lead != draft["lead_id"]:
+        return None, "", _fail("scope_mismatch", "draft_id belongs to a different lead.")
+    return draft, decision, ""
+
+
+def _reusable(conn, draft: dict, decision: str) -> bool:
+    if decision != "approve":
+        return False
+    existing = storage.get_approval_for_draft(conn, draft["id"])
+    return bool(existing and existing.get("status") == "approved")
+
+
+def ledger_preview(args: dict[str, Any]) -> tuple[dict | None, str]:
+    """The approval card for an approve/reject: ``(card, "")``, or ``(None, "")`` when the handler
+    refuses or reuses a stored approval without recording anything new."""
     with storage.unit_of_work() as conn:
-        draft = storage.get_draft(conn, draft_id)
+        draft, decision, refusal = _ledger_check(conn, args)
+        if draft is None or refusal or decision not in {"approve", "reject"} or _reusable(conn, draft, decision):
+            return None, ""
+    content = _ledger_content(draft, decision)
+    verb = "Approve" if decision == "approve" else "Reject"
+    message = (
+        f"{verb} the email draft to {content['to'] or 'this prospect'}?\n"
+        f"Subject: {content['subject']}\n"
+        "This only records your decision. It does not send anything."
+    )
+    return {"draft_id": content["draft_id"], "digest": approval.fingerprint(content), "message": message}, ""
+
+
+def request_approval(args: dict, **kwargs) -> str:
+    args = args or {}
+    with storage.unit_of_work() as conn:
+        draft, decision, refusal = _ledger_check(conn, args)
         if draft is None:
-            return _fail("draft_not_found", "draft_id was not found.")
-        requested_business = _ref(args)
-        if requested_business:
-            scoped, _reason = storage.resolve_brand(conn, requested_business)
-            if scoped is None or scoped["business_id"] != draft["business_id"]:
-                return _fail("scope_mismatch", "draft_id belongs to a different business.")
-        requested_lead = str(args.get("lead_id") or "")
-        if requested_lead and requested_lead != draft["lead_id"]:
-            return _fail("scope_mismatch", "draft_id belongs to a different lead.")
+            return refusal
+        draft_id = draft["id"]
+        status = {"pending": "pending", "approve": "approved", "reject": "rejected"}[decision]
         revision = domain.draft_revision(draft)
         existing = storage.get_approval_for_draft(conn, draft_id)
         if decision == "approve" and existing and existing.get("status") == "approved":
@@ -843,9 +862,11 @@ def request_approval(args: dict, **kwargs) -> str:
             existing["sent"] = False
             return _dump({"ok": True, "approval": existing, "delivery": adapter_for(draft["channel"]).send(draft), "sent": False, "sending_enabled": False})
         if decision in {"approve", "reject"}:
-            choice, reason = _host_decision(decision, draft)
-            if choice != decision:
-                return _fail(reason or "host_approval_required", "Host approval was not granted. Model-supplied flags are ignored.", sent=False, sending_enabled=False)
+            if approval.unattended(_CTX):
+                return _fail("unattended", "Approvals are never recorded from an unattended run.", sent=False, sending_enabled=False)
+            digest = approval.fingerprint(_ledger_content(draft, decision))
+            if not approval.consume(approval.LEDGER_TOOL, draft_id, digest, kwargs):
+                return _fail("host_approval_unavailable", "The owner's approval was not given for this exact draft. Model-supplied flags are ignored.", sent=False, sending_enabled=False)
         scope = {
             "business_id": draft["business_id"],
             "draft_id": draft_id,

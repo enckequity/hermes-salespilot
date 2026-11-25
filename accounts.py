@@ -125,6 +125,6 @@ def credential_capacity(conn, business_id: str) -> dict[str, Any]:
         "slots": slots,
         "connected_mailboxes": 1 if len(slots) <= 1 else 1,
         "max_credentials_available": 1,
-        "note": "From-addresses can differ; the authenticated mailbox cannot, until Hermes adds a "
-                "second secret slot. A mismatched sender is refused, never silently reused.",
+        "note": "From-addresses can differ; the authenticated mailbox cannot until a "
+                "second credential slot exists. A mismatched sender is refused, never silently reused.",
     }

@@ -1,6 +1,6 @@
 name: hermes-salespilot
-version: 1.1.1
-description: The AI sales desk for Hermes. Collect leads, draft outreach, send only after your approval, track replies and hot prospects.
+version: 1.1.1+teamshift.1
+description: A sales desk in chat. Collect leads from quoted evidence, qualify them, draft outreach, send one email at a time only after you approve that exact email, and track replies and hot prospects.
 author:
   name: ROCK
   url: https://github.com/ranggaoscar
@@ -24,9 +24,13 @@ provides_tools:
   - salespilot_plan_followups
   - salespilot_report
   - salespilot_request_approval
+  - salespilot_send_email
   - salespilot_configure_mail
   - salespilot_mission
   - salespilot_pipeline
+provides_hooks:
+  - pre_tool_call
+  - post_tool_call
 config_schema:
   followup_days:
     type: int
@@ -74,11 +78,11 @@ config_schema:
     type: secret
     env: SALESPILOT_SMTP_USERNAME
     label: SMTP username
-    description: Stored in Hermes credentials. Never written to config.yaml, SQLite or logs.
+    description: Stored with the workspace secrets. Never written to config.yaml, SQLite or logs.
     required: false
   smtp_password:
     type: secret
     env: SALESPILOT_SMTP_PASSWORD
     label: SMTP password
-    description: Stored in Hermes credentials. Read only through agent.secret_scope.
+    description: Stored with the workspace secrets. Never shown in chat or logs.
     required: false

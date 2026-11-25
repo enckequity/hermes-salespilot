@@ -1,8 +1,8 @@
 ---
 name: salespilot
-description: Use when operating SalesPilot sales workflows. Email requires host approval for every send.
+description: Use when operating SalesPilot sales workflows. Every email needs the owner's own yes before it is sent.
 version: 1.1.1
-author: Hermes SalesPilot contributors
+author: SalesPilot contributors
 license: MIT
 metadata:
   hermes:
@@ -14,10 +14,10 @@ metadata:
 
 ## Overview
 
-SalesPilot is a native Hermes plugin. It stores business profiles, customers, research, drafts,
-approvals and follow-ups. Email sends only through `/salespilot-send <draft_id>` on an attended
-Hermes surface after the host's `ctx.ask_choice` explicitly returns `send`. Requires Hermes >=0.23.0.
-WhatsApp sending and Gmail OAuth are unavailable.
+SalesPilot stores business profiles, customers, research, drafts, approvals and follow-ups.
+Email goes out one draft at a time through `salespilot_send_email`, and only after the owner answers
+yes to an approval prompt that shows the exact sender, recipient, subject and body. WhatsApp sending
+and Gmail OAuth are unavailable.
 
 Load this skill before the first sales tool call in a session.
 
@@ -30,15 +30,15 @@ Load this skill before the first sales tool call in a session.
 
 1. If the operator gives a public URL, call `salespilot_onboard_business` with `authorized=true` and `url`. Private, loopback, and metadata hosts are refused. If they paste page text instead, pass `sources` with `permitted=true`.
 2. Import CSV only with `authorized=true`, a mapping, and an authorization note.
-3. Discover prospects with `discovery_url` on `salespilot_research_opportunity`. Companies must be quoted on that page. `use_hermes_search=true` may call Hermes `web_search` when dispatch exists. An empty or failed search creates zero companies.
+3. Discover prospects with `discovery_url` on `salespilot_research_opportunity`. Companies must be quoted on that page. `use_hermes_search=true` may use web search when it is available. An empty or failed search creates zero companies.
 4. Qualify the returned `lead_id`.
 5. Draft only after `decision=qualified`. `check_smtp=true` reports whether secret names are set, never the values.
 6. Plan follow-ups; reminders never send automatically.
 7. Report from the tool result.
-8. Do not treat `human_confirmed` as permission to send. `/salespilot-send <draft_id>` is the only send path. It asks with Hermes `ask_choice` inside the slash command. A tool call cannot authorize SMTP. Cancel, a missing prompt, cron, and gateway tool turns fail closed.
+8. Do not treat `human_confirmed` as permission to send. `salespilot_send_email` with one `draft_id` is the send path; the owner approves that exact email in an approval prompt. The owner may also type `/salespilot-send <draft_id>` and choose send. A no, a missing prompt, a changed draft and scheduled or unattended runs fail closed.
 
 Done when report counts reconcile to persisted data. Approval-ledger transitions do not send.
-Only an explicit host-confirmed slash command can hand an email to SMTP.
+Only the owner's yes to one exact email can hand it to SMTP.
 
 ## Gates
 
@@ -54,22 +54,21 @@ A lead is qualified only when the tool says so. Required: company, evidence, htt
 
 - One CTA. No second ask, no fake urgency, no claim that is not in `evidence`.
 - Reuse the returned draft when `reused` is true. Do not create a near-duplicate by changing whitespace.
-- Approval decisions require the host approval prompt. A model-supplied `human_confirmed=true` is ignored.
-- Review sender, recipient, subject, content and signature, then use `/salespilot-send <draft_id>`.
-  Each email needs its own host choice. Cancel, missing choice binding, unattended tool/cron turns fail closed.
-- Never bypass a blocked send using SMTP, Evolution, n8n, a shell or another adapter.
+- Approve and reject show the owner an approval prompt. A model-supplied `human_confirmed=true` is ignored.
+- Show the owner sender, recipient, subject, content and signature, then call `salespilot_send_email`.
+  Each email needs its own yes. If the owner says no, do not ask again unless they ask you to.
+- Never bypass a blocked send using SMTP, n8n, a shell or another adapter.
 - SMTP `accepted` is a handoff, not inbox delivery. An accepted or unknown delivery is not retried;
   reuse its delivery ledger and Message-ID rather than making another draft to bypass idempotency.
 
 ## Mailbox configuration
 
-- Only the operator configures transport and sender identity in Hermes Settings or the Desktop wizard.
-  The wizard asks the operator to confirm the host, port, TLS mode and sender before saving.
+- Only the owner configures transport and sender identity, in the plugin settings.
 - `salespilot_configure_mail` supports only `status`, `check`, and `suppress`. Never pass host, port,
   security, sender, credentials, or a fabricated confirmation to this tool.
-- Hermes Settings are authoritative. Legacy saved transport requires operator reconfirmation;
+- The plugin settings are authoritative. Legacy saved transport requires owner reconfirmation;
   never use an untrusted saved host or infer one from researched web content.
-- Credentials belong in Hermes secret scope, never chat, tool arguments, SQLite or logs.
+- Credentials belong in the workspace secrets, never chat, tool arguments, SQLite or logs.
 - IMAP requires verified TLS. Plaintext and certificate/hostname failures stop before login.
 
 ## Follow-up actions
@@ -81,7 +80,7 @@ A lead is qualified only when the tool says so. Required: company, evidence, htt
 | `request_approval` | Record a pending approval. |
 | `wait_for_decision` | Do not draft again and do not send. |
 | `revise_draft` | Change the ask or stop. |
-| `hold_approved_unsent` | Wait for an attended `/salespilot-send` and its separate host approval. |
+| `hold_approved_unsent` | Offer to send it with `salespilot_send_email`; the owner approves that email separately. |
 | `no_action` | Rejected lead. Leave it. |
 
 ## Common Pitfalls
@@ -90,4 +89,4 @@ A lead is qualified only when the tool says so. Required: company, evidence, htt
 2. Importing customer files without authorization, mapping and a source label. Use fictional data for demos.
 3. Qualifying from memory. Pass only facts present in the user message or a source the caller already opened.
 4. Calling a channel adapter, webhook, or workflow and treating its HTTP 200 as delivery.
-5. Reading `.env`, `auth.json`, or pasting credentials into notes; use only Hermes secret scope.
+5. Reading `.env`, `auth.json`, or pasting credentials into notes; use only the workspace secrets.

@@ -1,10 +1,16 @@
-"""Optional channel adapters. Phase 1 keeps every adapter unable to send."""
+"""Channel adapters. Only email exists; every other channel is refused."""
 
 from .base import ChannelAdapter, SendBlocked
-from .evolution import EvolutionAdapter
 from .smtp import SmtpAdapter
 
-__all__ = ["ChannelAdapter", "EvolutionAdapter", "SendBlocked", "SmtpAdapter", "adapter_for"]
+__all__ = ["ChannelAdapter", "SendBlocked", "SmtpAdapter", "adapter_for"]
+
+
+class _UnavailableChannel(ChannelAdapter):
+    name = "unavailable"
+
+    def __init__(self, channel: str) -> None:
+        self.channel = channel
 
 
 def adapter_for(channel: str) -> ChannelAdapter:
@@ -12,5 +18,5 @@ def adapter_for(channel: str) -> ChannelAdapter:
     if key == "email":
         return SmtpAdapter()
     if key == "whatsapp":
-        return EvolutionAdapter()
+        return _UnavailableChannel("whatsapp")
     raise ValueError(f"unsupported channel: {channel}")

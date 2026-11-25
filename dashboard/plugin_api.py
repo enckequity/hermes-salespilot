@@ -75,7 +75,7 @@ async def save_imap(request: Request) -> dict:
     leaked = [key for key in body if re.search(r"pass|secret|token|credential", str(key), re.I)]
     if leaked:
         return {"ok": False, "code": "secret_in_body",
-                "error": "Mailbox passwords belong in Hermes secrets, not this endpoint.",
+                "error": "Mailbox passwords belong in the workspace secrets, not this endpoint.",
                 "rejected_fields": leaked, "sent": False}
     host = str(body.get("host") or "").strip()
     if host and ("://" in host or "@" in host or " " in host):

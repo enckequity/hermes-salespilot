@@ -15,6 +15,7 @@ import views
 LIVE_COPY = Path(r"D:/sp61/backup/pre-62c/salespilot.db")
 
 
+@unittest.skipUnless(LIVE_COPY.exists(), "needs the upstream author's local schema-3 database copy")
 class MigrationSplitTests(unittest.TestCase):
     def test_read_does_not_change_schema_three_copy(self):
         tmp = tempfile.TemporaryDirectory()

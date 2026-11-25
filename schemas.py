@@ -142,7 +142,7 @@ RESEARCH = {
                 "items": {"type": "object"},
             },
             "discovery_url": _str("Authorized public directory URL to fetch. Companies must be quoted from the page."),
-            "use_hermes_search": _bool("Ask Hermes web_search when dispatch is available. Never invents results."),
+            "use_hermes_search": _bool("Use the assistant's web search when it is available. Never invents results."),
             "query": _str("Search query used only if use_hermes_search is true."),
             "authorized": _bool("Required true before a discovery URL is fetched."),
             "company": _str("Optional company hint. Must also appear in the source text."),
@@ -202,7 +202,8 @@ APPROVAL = {
     "name": "salespilot_request_approval",
     "description": (
         "Record an approval-ledger transition for a draft: request, approve, or reject. "
-        "Idempotent per draft. Approve does not send. Phase 1 adapters always return sending_disabled."
+        "Approve and reject show the owner an approval prompt and only take effect after their yes. "
+        "Idempotent per draft. Approve does not send; use salespilot_send_email for that."
     ),
     "parameters": _obj(
         {
@@ -210,7 +211,7 @@ APPROVAL = {
             "decision": _str("request, approve, or reject."),
             "actor": _str("Who decided. Default operator."),
             "note": _str("Short reason. Do not include secrets."),
-            "human_confirmed": _bool("Ignored. Approval comes from Hermes ask_choice on an attended surface, not from the model."),
+            "human_confirmed": _bool("Ignored. Approval comes from the owner's own yes to the approval prompt, never from the model."),
             "business_id": _str("Optional. Must match the draft's business or the call is refused."),
             "lead_id": _str("Optional. Must match the draft's lead or the call is refused."),
         },
@@ -222,7 +223,7 @@ CONFIGURE = {
     "name": "salespilot_configure_mail",
     "description": (
         "Report SMTP status, check the operator-configured connection, or suppress one address. "
-        "Cannot change transport or sender identity. Configure those in Hermes Settings or the Desktop wizard. Does not send email."
+        "Cannot change transport or sender identity; the owner sets those in the plugin settings. Does not send email."
     ),
     "parameters": _obj(
         {
@@ -291,7 +292,20 @@ PIPELINE = {
     ),
 }
 
-TOOLS = (ONBOARD, IMPORT, QUALIFY, RESEARCH, DRAFT, FOLLOWUP, REPORT, APPROVAL, CONFIGURE, MISSION, PIPELINE)
+SEND = {
+    "name": "salespilot_send_email",
+    "description": (
+        "Send ONE email draft through the owner's own mailbox. Before anything is sent the owner sees the exact "
+        "sender, recipient, subject and body in an approval prompt; nothing goes out without their yes, and a "
+        "draft changed after the prompt is refused. Suppressed, bounced, refused or recently contacted "
+        "addresses and the daily cap are checked again at send time. Never runs in scheduled or unattended "
+        "runs. Not a bulk send: call it once per draft."
+    ),
+    "parameters": _obj({"draft_id": _str("Email draft id from salespilot_draft_outreach.")}, ["draft_id"]),
+}
+SEND["parameters"]["additionalProperties"] = False
+
+TOOLS = (ONBOARD, IMPORT, QUALIFY, RESEARCH, DRAFT, FOLLOWUP, REPORT, APPROVAL, SEND, CONFIGURE, MISSION, PIPELINE)
 
 # Every scoped tool accepts an explicit brand reference. `brand` wins over `business_id`, and
 # omitting both means the active brand — never a silent guess at a different tenant.

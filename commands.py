@@ -1,4 +1,4 @@
-"""Human mail commands. Sending exists only after ask_choice returns send."""
+"""Mail commands. An email goes out only after the person's yes for exactly that email."""
 
 from __future__ import annotations
 
@@ -6,8 +6,9 @@ import json
 from typing import Any
 
 try:
-    from . import domain, mail, pipeline, plugin_settings, storage
+    from . import approval, domain, mail, pipeline, plugin_settings, storage
 except ImportError:
+    import approval
     import domain
     import mail
     import pipeline
@@ -50,13 +51,13 @@ def configure_mail(args: dict, **kwargs) -> str:
     del kwargs
     args = args or {}
     if _SECRET_ARGS.intersection(args):
-        return _fail("secret_in_args", "SMTP username and password belong in Hermes secrets, not this call.")
+        return _fail("secret_in_args", "SMTP username and password belong in the workspace secrets, not this call.")
     allowed = {"action", "business_id", "brand", "email", "reason"}
     if set(args) - allowed:
-        return _fail("operator_settings_only", "SMTP transport and sender identity can only be changed in Hermes Settings or the confirmed Desktop wizard.")
+        return _fail("operator_settings_only", "SMTP transport and sender identity can only be changed in the plugin settings by the owner.")
     action = str(args.get("action") or "status").strip().lower()
     if action not in {"status", "check", "suppress"}:
-        return _fail("operator_settings_only", "Use Hermes Settings or the confirmed Desktop wizard to configure SMTP.")
+        return _fail("operator_settings_only", "The owner configures SMTP in the plugin settings.")
     business_id = str(args.get("business_id") or "")
     with storage.unit_of_work() as conn:
         business = storage.get_business(conn, business_id)
@@ -77,10 +78,10 @@ def configure_mail(args: dict, **kwargs) -> str:
             current = storage.get_mail_settings(conn, business_id)
             account, source = plugin_settings.effective_account(current)
             if account is None:
-                return _fail("mail_not_configured", "Save SMTP settings, or fill SMTP host and sender email in Settings → Plugins → SalesPilot.", source=source)
+                return _fail("mail_not_configured", "Mail is not set up yet. The owner fills SMTP host and sender email in the SalesPilot settings.", source=source)
             username, password, reason = _secrets()
             if reason:
-                return _fail(reason, "Hermes secret scope did not return SMTP credentials.", credentials_logged=False)
+                return _fail(reason, "The SMTP credentials are not available.", credentials_logged=False)
             result = mail.probe(account, username, password)
             result["sent"] = False
             result["source"] = source
@@ -90,27 +91,22 @@ def configure_mail(args: dict, **kwargs) -> str:
             return _dump(result)
 
 
-def slash_send(raw_args: str) -> str:
-    draft_id = str(raw_args or "").strip().split()[0] if str(raw_args or "").strip() else ""
-    if not draft_id:
-        return "Usage: /salespilot-send <draft_id>"
-    ctx = _CTX
-    ask = getattr(ctx, "ask_choice", None) if ctx is not None else None
-    if ask is None:
-        return _fail("host_approval_unavailable", "Sending needs the Hermes slash-command choice prompt.")
+def _prepare(draft_id: str) -> tuple[dict[str, Any] | None, str]:
+    """Run every pre-send check and build the exact message. ``(bundle, "")`` when one email may go
+    out after a yes, else ``(None, json_result)`` for a refusal or an earlier delivery. Writes nothing."""
     with storage.unit_of_work() as conn:
         draft = storage.get_draft(conn, draft_id)
         if draft is None:
-            return _fail("draft_not_found", "draft_id was not found.")
+            return None, _fail("draft_not_found", "draft_id was not found.")
         if draft.get("channel") != "email":
-            return _fail("not_email", "This command sends email drafts only.")
+            return None, _fail("not_email", "Only email drafts can be sent.")
         lead = storage.get_lead(conn, draft["lead_id"])
-        account, account_source = plugin_settings.effective_account(storage.get_mail_settings(conn, draft["business_id"]))
+        account, _account_source = plugin_settings.effective_account(storage.get_mail_settings(conn, draft["business_id"]))
         if lead is None or account is None:
-            return _fail("not_ready", "The draft needs a lead and saved mail settings.")
+            return None, _fail("not_ready", "The draft needs a lead and saved mail settings.")
         recipient = str(draft.get("recipient") or "")
         if recipient.lower() != str(lead.get("email") or "").lower() or not lead.get("email_valid"):
-            return _fail("unverified_recipient", "Recipient must be the lead's format-valid email. Nothing was sent.")
+            return None, _fail("unverified_recipient", "Recipient must be the lead's format-valid email. Nothing was sent.")
         plain = str(draft.get("body") or "").strip()
         signature = str(account.get("signature_text") or "").strip()
         if signature and signature not in plain:
@@ -121,30 +117,26 @@ def slash_send(raw_args: str) -> str:
             existing["retried"] = False
             existing["sent"] = False
             existing["inbox_delivery_proven"] = False
-            return _dump({"ok": True, "reused": True, "delivery": existing})
+            return None, _dump({"ok": True, "reused": True, "delivery": existing})
         # Consent and lifecycle are read at send time, not when the draft was written: a refusal,
         # bounce, archive or do-not-contact that arrived after drafting still stops this send. The
         # lifecycle check runs first so the refusal is reported as a refusal, not as a generic
         # suppression entry (which can also come from a plain operator opt-out).
         block = pipeline.send_block_reason(lead)
         if block:
-            return _fail(block, "This prospect must not receive email now. Nothing was sent.")
+            return None, _fail(block, "This prospect must not receive email now. Nothing was sent.")
         if storage.is_suppressed(conn, draft["business_id"], recipient):
-            return _fail("suppressed", "That address is on the suppression list.")
+            return None, _fail("suppressed", "That address is on the suppression list.")
         if storage.bounced_recipient(conn, draft["business_id"], recipient):
-            return _fail("recipient_bounced", "A previous message to this address bounced. Nothing was sent.")
+            return None, _fail("recipient_bounced", "A previous message to this address bounced. Nothing was sent.")
         if storage.recent_delivery_count(conn, draft["business_id"]) >= mail.DAILY_CAP:
-            return _fail("rate_limited", "Daily send cap reached. Nothing was sent.")
+            return None, _fail("rate_limited", "Daily send cap reached. Nothing was sent.")
         if storage.recent_recipient(conn, draft["business_id"], recipient, mail.REPEAT_DAYS):
-            return _fail("repeated_contact", "That recipient was already contacted. Nothing was sent.")
+            return None, _fail("repeated_contact", "That recipient was already contacted. Nothing was sent.")
         try:
             message = mail.compose(account, draft)
         except ValueError as exc:
-            return _fail("bad_message", str(exc))
-        question = (
-            f"Send one email to {recipient}? Subject: {message['Subject']}. "
-            f"Revision {revision}. This is not a bulk send."
-        )
+            return None, _fail("bad_message", str(exc))
         prepared = {
             "business_id": draft["business_id"],
             "draft_id": draft_id,
@@ -154,11 +146,114 @@ def slash_send(raw_args: str) -> str:
             "message_id": str(message["Message-ID"]),
             "subject": str(message["Subject"]),
         }
-    choice = ask(question, ["send", "cancel"])
+    sender = str(message["From"])
+    content = {
+        "draft_id": draft_id,
+        "revision": revision,
+        "from": sender,
+        "to": recipient,
+        "subject": str(message["Subject"]),
+        "body": message.get_body(("plain",)).get_content().strip(),
+    }
+    return {
+        "draft": draft,
+        "account": account,
+        "message": message,
+        "prepared": prepared,
+        "revision": revision,
+        "content": content,
+        "digest": approval.fingerprint(content),
+    }, ""
+
+
+def _card_text(content: dict[str, Any]) -> str:
+    return (
+        f"Send one email from {content['from']} to {content['to']}.\n"
+        f"Subject: {content['subject']}\n"
+        f"---\n{content['body']}\n---\n"
+        "Approving sends exactly this email, once. Nothing else is sent."
+    )
+
+
+def send_preview(draft_id: str) -> tuple[dict[str, Any] | None, str]:
+    """The approval card for one send: ``(card, "")``, ``(None, "")`` when the tool will refuse or
+    reuse an earlier delivery without sending, or ``(None, reason)`` to block outright."""
+    if not draft_id:
+        return None, ""
+    bundle, _refusal = _prepare(draft_id)
+    if bundle is None:
+        return None, ""
+    content = bundle["content"]
+    if len(content["body"]) > approval.BODY_LIMIT:
+        return None, (
+            f"This email is longer than {approval.BODY_LIMIT} characters, too long to show whole in an approval. "
+            "Shorten the draft, then ask again. Nothing was sent."
+        )
+    return {"draft_id": draft_id, "digest": bundle["digest"], "message": _card_text(content)}, ""
+
+
+def send_email(args: dict, **kwargs) -> str:
+    """Tool handler: send one email draft, only after the owner's native yes for exactly this email."""
+    args = args or {}
+    draft_id = str(args.get("draft_id") or "").strip()
+    if not draft_id:
+        return _fail("bad_draft", "draft_id is required.")
+    if approval.unattended(_CTX):
+        return _fail("unattended", "Emails are never sent from an unattended run. Nothing was sent.")
+    bundle, refusal = _prepare(draft_id)
+    if bundle is None:
+        return refusal
+    if not approval.consume(approval.SEND_TOOL, draft_id, bundle["digest"], kwargs):
+        with storage.unit_of_work() as conn:
+            storage.add_event(conn, "send_denied", bundle["prepared"]["business_id"], draft_id, {"choice": "no_native_approval"})
+        return _fail(
+            "host_approval_unavailable",
+            "This email was not approved exactly as it stands now. Nothing was sent. Ask again to see it for approval.",
+        )
+    return _deliver(bundle)
+
+
+def slash_send(raw_args: str) -> str:
+    draft_id = str(raw_args or "").strip().split()[0] if str(raw_args or "").strip() else ""
+    if not draft_id:
+        return "Usage: /salespilot-send <draft_id>"
+    ctx = _CTX
+    ask = getattr(ctx, "ask_choice", None) if ctx is not None else None
+    if ask is None:
+        return _fail("host_approval_unavailable", "Sending needs a choice prompt from the person, and none is available here.")
+    if approval.unattended(ctx):
+        return _fail("unattended", "Emails are never sent from an unattended run. Nothing was sent.")
+    bundle, refusal = _prepare(draft_id)
+    if bundle is None:
+        return refusal
+    content = bundle["content"]
+    if len(content["body"]) > approval.BODY_LIMIT:
+        return _fail("too_long_to_review", f"This email is longer than {approval.BODY_LIMIT} characters, too long to show whole. Nothing was sent.")
+    question = f"{_card_text(content)} Revision {bundle['revision']}."
+    try:
+        choice = ask(question, ["send", "cancel"])
+    except Exception:
+        choice = None
     if choice != "send":
         with storage.unit_of_work() as conn:
-            storage.add_event(conn, "send_denied", prepared["business_id"], draft_id, {"choice": choice or ""})
-        return _fail("host_declined" if choice else "host_approval_unavailable", "Host did not choose send. Nothing was sent.")
+            storage.add_event(conn, "send_denied", bundle["prepared"]["business_id"], draft_id, {"choice": choice or ""})
+        return _fail("host_declined" if choice else "host_approval_unavailable", "The person did not choose send. Nothing was sent.")
+    again, refusal = _prepare(draft_id)
+    if again is None:
+        return refusal
+    if again["digest"] != bundle["digest"]:
+        return _fail("draft_changed", "The draft changed while waiting for the answer. Nothing was sent.")
+    return _deliver(bundle)
+
+
+def _deliver(bundle: dict[str, Any]) -> str:
+    prepared = bundle["prepared"]
+    draft = bundle["draft"]
+    account = bundle["account"]
+    message = bundle["message"]
+    revision = bundle["revision"]
+    draft_id = prepared["draft_id"]
+    recipient = prepared["recipient"]
     with storage.unit_of_work() as conn:
         delivery_id = storage.begin_delivery(conn, prepared)
     username, password, reason = _secrets()
@@ -169,7 +264,7 @@ def slash_send(raw_args: str) -> str:
         _finish(delivery_id, "failed", 0)
         return _fail(
             "sender_mismatch",
-            "This Hermes profile holds one SMTP identity, so a second brand would send under the first "
+            "This profile holds one SMTP identity, so a second brand would send under the first "
             "brand's account. Nothing was sent.",
             multi_mailbox_supported=False,
         )

@@ -208,27 +208,18 @@ class HostApprovalTests(unittest.TestCase):
         })
         self.assertEqual(ignored["code"], "host_approval_unavailable")
 
-        class Attended:
-            def session_surface(self):
-                return "cli"
+        import approval as approval_gate
+        import commands
 
-            def ask_choice(self, question, choices):
-                return "approve"
-
-        tools.bind(Attended())
-        approved = _call(tools.request_approval, {"draft_id": draft["draft"]["id"], "decision": "approve", "human_confirmed": False})
+        hook = approval_gate.make_hook(commands.send_preview, tools.ledger_preview)
+        args = {"draft_id": draft["draft"]["id"], "decision": "approve", "human_confirmed": False}
+        directive = hook(tool_name="salespilot_request_approval", args=dict(args))
+        self.assertEqual(directive["action"], "approve")
+        approved = _call(tools.request_approval, args)
         self.assertEqual(approved["approval"]["status"], "approved")
         self.assertFalse(approved["sent"])
         self.assertEqual(approved["delivery"]["reason"], "sending_disabled_phase_1")
 
-        class Gateway:
-            def session_surface(self):
-                return "telegram"
-
-            def ask_choice(self, question, choices):
-                return "approve"
-
-        tools.bind(Gateway())
         with storage.unit_of_work() as conn:
             conn.execute("UPDATE approvals SET scope_json=? WHERE draft_id=?", ('{"revision":"old","action":"approve"}', draft["draft"]["id"]))
         stale = _call(tools.request_approval, {"draft_id": draft["draft"]["id"], "decision": "approve"})

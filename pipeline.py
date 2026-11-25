@@ -111,8 +111,8 @@ def public_row(lead: dict[str, Any], suppressed: bool = False) -> dict[str, Any]
         recommended = "await_approval"
     next_action = {
         "discovered": "Review the quoted evidence before qualifying.",
-        "qualified": "Draft stays behind /salespilot-send.",
-        "draft_ready": "Wait for slash-command approval. Do not send from this page.",
+        "qualified": "Draft next. Every email waits for the owner's approval.",
+        "draft_ready": "Waiting for the owner to approve this exact email.",
         "contacted": "SMTP accepted is not inbox delivery. Follow up only if a reply is recorded.",
         "replied": "Read the reply before any further send.",
         "follow_up_due": "Record the follow-up when it is actually done.",
@@ -129,7 +129,7 @@ def public_row(lead: dict[str, Any], suppressed: bool = False) -> dict[str, Any]
         else:
             next_action = "Company and contact both fit. Qualify to release it for drafting."
     elif stage == "ready_for_outreach":
-        next_action = "Relevant contact on a verified source. Send still waits for /salespilot-send approval."
+        next_action = "Relevant contact on a verified source. Sending still waits for the owner's approval."
     elif stage == "suppressed":
         next_action = "Suppressed. Do not re-enter outreach."
     return {
